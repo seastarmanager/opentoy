@@ -8,7 +8,7 @@ from loguru import logger
 
 
 class AudioStreamer:
-    def __init__(self, sample_rate=48000, channels=1, frame_size=2880):  # 60ms
+    def __init__(self, sample_rate=16000, channels=1, frame_size=960):  # 60ms
         self.sample_rate = sample_rate
         self.channels = channels
         self.frame_size = frame_size
