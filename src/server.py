@@ -13,7 +13,7 @@ from .vad import VADSignal, VoiceActivityDetector
 
 
 class AudioProcessor:
-    def __init__(self, sample_rate=48000, channels=1, frame_size=28800):
+    def __init__(self, sample_rate=16000, channels=1, frame_size=960):
         self.sample_rate = sample_rate
         self.channels = channels
         self.frame_size = frame_size
@@ -56,9 +56,10 @@ class AudioProcessor:
             full_audio = b"".join(self.buffer)
             
             # Play the recorded audio first
-            self.tts.stream.write(full_audio)
+            # self.tts.stream.write(full_audio)
             
             self.buffer.clear()
+            self.cache = {}
 
             # Process through ASR
             text = self.asr.to_text(full_audio)
