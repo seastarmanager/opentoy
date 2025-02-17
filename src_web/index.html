@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能语音助手</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+<div id="app" class="min-h-screen bg-gray-100">
+    <!-- 用户名输入 -->
+    <div v-if="!userSaved" class="p-4 max-w-md mx-auto">
+        <div class="bg-white rounded-lg p-6 shadow-md">
+            <h2 class="text-lg font-bold mb-4">欢迎使用实时语音助手</h2>
+            <input v-model="userName" placeholder="我该如何称呼您？"
+                   class="w-full mb-4 p-2 border rounded">
+            <button @click="saveUser"
+                    class="w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600">
+                保存
+            </button>
+        </div>
+    </div>
+
+    <!-- 主界面 -->
+    <div v-else class="p-4 max-w-2xl mx-auto h-screen flex flex-col">
+        <!-- 状态指示 -->
+        <div class="mb-4 flex items-center">
+            <div :class="statusClass" class="w-3 h-3 rounded-full mr-2"></div>
+            <span class="text-sm">{{ statusText }}</span>
+        </div>
+
+        <!-- 聊天记录 -->
+        <div ref="chatContainer"
+             class="bg-white rounded-lg p-4 flex-1 mb-4 overflow-y-auto shadow-inner"
+             style="max-height: 60vh;"
+             @scroll="handleScroll">
+            <div v-for="(msg, index) in chatLog" :key="index"
+                 class="mb-2 p-2 rounded" :class="msg.isUser ? 'bg-blue-100 ml-4' : 'bg-gray-100 mr-4'">
+              <span v-if="msg.needClickPlay" class="text-sm cursor-pointer text-blue-500"
+                    @click="playPendingAudio(msg)">
+                {{ msg.text }}
+              </span>
+              <template v-else>
+                <span class="text-sm">{{ msg.text }}</span>
+                <audio v-if="msg.audio" controls class="mt-1 w-full"></audio>
+              </template>
+            </div>
+        </div>
+
+        <!-- 控制栏 -->
+        <div class="bg-white rounded-lg p-4 shadow-md">
+            <div class="flex items-center justify-between">
+                <!-- 静音按钮 -->
+                <button @click="toggleMute" class="p-2 rounded-full hover:bg-gray-100">
+                    <i :class="isMuted ? 'fa-microphone-slash text-gray-600' : 'fa-microphone  text-green-600'"
+                       class="fas text-xl"></i>
+                </button>
+
+                <!-- 音量控制 -->
+                <div class="relative h-24 w-8">
+                    <input type="range" v-model="volume" min="0" max="100"
+                           class="absolute top-0 left-1/2 -translate-x-1/2 w-24 h-24 origin-center -rotate-90">
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const { createApp } = Vue;
+
+// 音频播放管理器
+const audioManager = {
+    currentAudio: null,
+
+    play(data, volume, onEnd, onError) {
+        // 停止当前播放
+        if (this.currentAudio) {
+            this.currentAudio.pause();
+            URL.revokeObjectURL(this.currentAudio.src);
+        }
+
+        // 创建新音频
+        const blob = this.base64ToBlob(data.audio, `audio/${data.format}`);
+        this.currentAudio = new Audio(URL.createObjectURL(blob));
+        this.currentAudio.volume = volume / 100;
+
+        // 监听播放结束事件
+        this.currentAudio.onended = onEnd;
+
+        // 尝试播放
+        this.currentAudio.play().catch((err) => {
+            console.log('自动播放被阻止');
+            onError(data);
+        });
+    },
+
+    setVolume(volume) {
+        if (this.currentAudio) {
+            this.currentAudio.volume = volume / 100;
+        }
+    },
+
+    base64ToBlob(base64, mimeType) {
+        const byteCharacters = atob(base64);
+        const byteArrays = [];
+        for (let offset = 0; offset < byteCharacters.length; offset += 1024) {
+            const slice = byteCharacters.slice(offset, offset + 1024);
+            const byteNumbers = new Array(slice.length);
+            for (let i = 0; i < slice.length; i++) {
+                byteNumbers[i] = slice.charCodeAt(i);
+            }
+            byteArrays.push(new Uint8Array(byteNumbers));
+        }
+        return new Blob(byteArrays, { type: mimeType });
+    }
+};
+
+createApp({
+    data() {
+        return {
+            userSaved: false,
+            userName: '',
+            userId: '',
+            isMuted: false,
+            volume: 50,
+            status: 'idle', // 状态机：idle/listening/thinking/speaking
+            chatLog: [],
+            isReplying: false,
+
+            // Web Audio相关
+            audioContext: null,
+            workletNode: null,
+            ws: null,
+
+            // scroll
+            autoScroll: true,
+            lastScrollHeight: 0
+        }
+    },
+    computed: {
+        statusText() {
+            const statusMap = {
+                idle: '空闲中',
+                listening: '聆听中...',
+                thinking: '思考中...',
+                replying: '回复中...'
+            }
+            return statusMap[this.status];
+        },
+        statusClass() {
+            return {
+                'bg-green-500': this.status === 'idle',
+                'bg-yellow-500': this.status === 'listening',
+                'bg-blue-500': this.status === 'thinking',
+                'bg-purple-500': this.status === 'replying'
+            }
+        }
+    },
+    async mounted() {
+        // 加载用户信息
+        if(localStorage.userId) {
+            this.userId = localStorage.userId;
+            this.userName = localStorage.userName;
+            this.userSaved = true;
+            await this.initAudio();
+        }
+    },
+    methods: {
+        isIOS() {
+            return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+        },
+        playPendingAudio(msg) {
+            this.isMuted = true;
+            this.status = 'replying';
+            this.isReplying = true;
+            audioManager.play(
+                msg.audioData,
+                this.volume,
+                () => {
+                    this.isMuted = false;
+                    this.status = 'idle';
+                    this.isReplying = false;
+                },
+                () => {
+                    this.chatLog.push({
+                        isUser: false,
+                        text: '播放失败，请重试'
+                    });
+                }
+            );
+        },
+        saveUser() {
+            this.userId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+            localStorage.userId = this.userId;
+            localStorage.userName = this.userName;
+            this.userSaved = true;
+            this.initAudio();
+        },
+        async initAudio() {
+            try {
+                // 初始化WebSocket
+                this.ws = new WebSocket('ws://localhost:8765');
+                this.ws.onmessage = this.handleMessage;
+
+                this.ws.onopen = () => {
+                    const data = {
+                        type: 'user_info',
+                        userId: this.userId,
+                        userName: this.userName
+                    }
+                    this.ws.send(JSON.stringify(data));
+                };
+
+                // 初始化音频设备
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        noiseSuppression: true,
+                        echoCancellation: true
+                    }
+                });
+
+                this.audioContext = new AudioContext({ sampleRate: 16000 });
+                await this.audioContext.audioWorklet.addModule('audio-processor.js');
+
+                const source = this.audioContext.createMediaStreamSource(stream);
+                this.workletNode = new AudioWorkletNode(this.audioContext, 'audio-processor');
+
+                // 连接音频处理节点
+                source.connect(this.workletNode);
+                this.workletNode.port.onmessage = (e) => {
+                    if(!this.isMuted && this.ws.readyState === WebSocket.OPEN) {
+                        this.ws.send(e.data);
+                    }
+                };
+
+            } catch (err) {
+                console.error('音频初始化失败:', err);
+            }
+        },
+
+        handleMessage(event) {
+            const data = JSON.parse(event.data);
+            // 状态更新
+            if(data.type === 'status') {
+                if (this.isReplying)  {this.status === 'replying'}
+                else { this.status = data.status;}
+            }
+            // 用户发言
+            else if(data.type === 'text_user') {
+                console.log('收到：',data)
+                const lastIndex = this.chatLog.length;
+                this.chatLog.push({
+                    isUser: true,
+                    text: data.text
+                });
+            }
+            // AI文本回复
+            else if(data.type === 'text_robot') {
+                console.log('收到：',data)
+                const lastIndex = this.chatLog.length;
+                this.chatLog.push({
+                    isUser: false,
+                    text: data.text
+                });
+            }
+            // 音频回复
+            else if(data.type === 'audio') {
+                this.isMuted = true;
+                this.isReplying = true;
+                this.status = 'replying';
+                audioManager.play(data, this.volume, () => {
+                    this.isMuted = false;
+                    this.status = 'idle';
+                    this.isReplying = false;}, (audioData) => {
+                    this.isMuted = false;
+                    this.status = 'idle';
+                    this.isReplying = false;
+                    // iOS 静音激活逻辑
+                    if (this.isIOS()) {
+                        this.chatLog.push({
+                            isUser: false,
+                            text: '点击播放语音',
+                            audioData: audioData,
+                            needClickPlay: true
+                        });
+                    } else {
+                        this.chatLog.push({
+                            isUser: false,
+                            text: '自动播放被阻止'
+                        });
+                    }
+                });
+            };
+            this.$nextTick(() => {
+                const container = this.$refs.chatContainer;
+                if (!container) return;
+                // 仅在需要自动滚动时触发
+                if (this.autoScroll) {
+                    container.scrollTop = container.scrollHeight;
+                }
+                this.lastScrollHeight = container.scrollHeight;
+            });
+        },
+
+        handleScroll() {
+            const container = this.$refs.chatContainer;
+            if (!container) return;
+
+            // 检测是否在底部（阈值10px）
+            const threshold = 10;
+            this.autoScroll = container.scrollTop + container.clientHeight >=
+                             container.scrollHeight - threshold;
+        },
+
+        toggleMute() {
+            this.isMuted = !this.isMuted;
+        }
+    },
+    watch: {
+        volume(val) {
+            audioManager.setVolume(val);
+        }
+    }
+}).mount('#app');
+</script>
+</body>
+</html>
